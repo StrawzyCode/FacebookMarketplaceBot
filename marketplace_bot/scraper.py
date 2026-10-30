@@ -191,7 +191,7 @@ class MarketplaceScraper:
             pass
         self._expand_description()
         data = self.page.evaluate(DETAIL_JS)
-        apply_details(listing, data, self.settings.images_per_listing)
+        apply_details(listing, data, self.settings.images_per_listing or 0)
         self._pause()
 
     def _expand_description(self) -> None:

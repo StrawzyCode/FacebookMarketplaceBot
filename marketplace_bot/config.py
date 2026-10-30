@@ -23,7 +23,7 @@ def _float(value: str | None, default: float | None) -> float | None:
     return float(value)
 
 
-def _int(value: str | None, default: int) -> int:
+def _int(value: str | None, default: int | None) -> int | None:
     if value is None or value.strip() == "":
         return default
     return int(value)
@@ -31,6 +31,11 @@ def _int(value: str | None, default: int) -> int:
 
 @dataclass
 class Settings:
+    # How listings are matched: auto (free local AI if installed, else free keyword rules),
+    # rules, ollama, or claude (paid).
+    ai_backend: str = "auto"
+    ollama_url: str = "http://localhost:11434"
+    ollama_model: str = "gemma3:4b"
     model: str = "claude-opus-5-5"
     refusal_fallback: bool = True
 
@@ -46,9 +51,10 @@ class Settings:
     results_dir: Path = PROJECT_ROOT / "results"
 
     max_results_per_query: int = 80
-    max_deep_checks: int = 40
-    images_per_listing: int = 3
-    ai_workers: int = 4
+    # None = use the default for the chosen backend (see backends.py).
+    max_deep_checks: int | None = None
+    images_per_listing: int | None = None
+    ai_workers: int | None = None
     min_delay_seconds: float = 1.5
     max_delay_seconds: float = 4.0
 
@@ -60,6 +66,9 @@ def load_settings() -> Settings:
     env = os.environ.get
     defaults = Settings()
     return Settings(
+        ai_backend=env("AI_BACKEND") or defaults.ai_backend,
+        ollama_url=env("OLLAMA_URL") or defaults.ollama_url,
+        ollama_model=env("OLLAMA_MODEL") or defaults.ollama_model,
         model=env("CLAUDE_MODEL") or defaults.model,
         refusal_fallback=_bool(env("CLAUDE_REFUSAL_FALLBACK"), defaults.refusal_fallback),
         default_location=env("DEFAULT_LOCATION", "").strip(),

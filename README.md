@@ -1,7 +1,9 @@
 # Facebook Marketplace Match Bot
 
-Describe what you want in plain English. The bot searches Facebook Marketplace near you, looks through
-every listing it finds, and tells you which one is the best match and why.
+Describe what you want in plain English. The bot searches Facebook Marketplace near you, goes through
+the listings it finds, and tells you which one is the best match and why.
+
+**It's free.** No subscriptions, no API keys, nothing to pay.
 
 ```
 python -m marketplace_bot search "Electric standing desk, at least 60 inches wide, no wobble, under $250, within 25 miles of Denver, CO"
@@ -9,27 +11,34 @@ python -m marketplace_bot search "Electric standing desk, at least 60 inches wid
 
 ## How it works
 
-1. **Understands your prompt.** Claude turns your request into a search plan: several search phrasings
-   (brand names, synonyms, common misspellings), your location and distance, your budget, and your
-   must-haves, nice-to-haves and deal-breakers.
-2. **Searches thoroughly.** It runs every search phrasing on Marketplace in a real browser, scrolls through
-   the results and merges duplicates.
+1. **Reads your prompt:** what you want, where, how far, your budget, must-haves and deal-breakers.
+2. **Searches Marketplace** in a real browser using your Facebook login, with several phrasings of your
+   item, scrolling through all the results.
 3. **Enforces your distance.** It looks up each listing's town and drops anything farther than the radius
-   you set. It also drops listings over budget or with titles like "WANTED" or "parts only".
-4. **Screens every listing.** Claude scores each remaining listing from its title, price and location,
-   so the most promising ones are inspected first.
-5. **Inspects the best ones in depth.** It opens each shortlisted listing, reads the full description,
-   and has Claude look at the photos. Each listing is checked against every requirement, with notes on
-   red flags, scam signs, price fairness, and questions to ask the seller.
-6. **Picks the winner.** Claude compares the finalists and picks the best one. The result is a report
-   that opens in your browser, plus `matches.csv` for a spreadsheet and `results.json`.
+   you set. It also drops listings over budget and "WANTED" or "parts only" posts.
+4. **Opens and checks the most promising listings:** the full description against every requirement,
+   with warnings about deal-breakers and scam signs (pay-first requests, prices far below similar
+   listings, "text me at...").
+5. **Picks the best match** and opens a report in your browser. You also get `matches.csv` for a
+   spreadsheet.
+
+There are two free ways it can judge listings:
+
+| | Keyword matching (default) | Local AI (optional, also free) |
+| --- | --- | --- |
+| Setup | Nothing extra | Install Ollama + download a model (about 3 GB) |
+| Speed | Instant | Slower; depends on your computer |
+| Understands | Your words, numbers ("at least 60 inches", "under 120k miles"), years, budgets, "no rust" | Meaning: "barely used", model names, brands it knows |
+| Looks at photos | No | Yes |
+| Needs | Any computer | 8 GB+ of memory (16 GB for the bigger model) |
+
+The bot uses the local AI automatically if it's installed, and keyword matching if not.
 
 ## What you need
 
-- **Your own computer** (Windows, Mac or Linux) with **Python 3.10 or newer**. The bot logs in to Facebook
-  as you, so it has to run on your machine.
-- **An Anthropic API key** from <https://console.anthropic.com/settings/keys>. This is what powers the
-  understanding and matching. Usage is billed to that account (see [Cost](#cost)).
+- **Your own computer** (Windows, Mac or Linux) with **Python 3.10 or newer**
+  ([python.org/downloads](https://www.python.org/downloads/); on Windows, tick "Add Python to PATH").
+  The bot logs in to Facebook as you, so it runs on your machine.
 - **A Facebook account** that can use Marketplace.
 
 ## One-time setup
@@ -46,16 +55,32 @@ python -m venv .venv
 pip install -r requirements.txt
 python -m playwright install chromium
 
-# 3. Add your settings
-#    Windows: copy .env.example .env      Mac / Linux: cp .env.example .env
-#    Then open .env and set ANTHROPIC_API_KEY (and DEFAULT_LOCATION if you like).
-
-# 4. Log in to Facebook once (a browser window opens; log in like normal, including 2FA)
+# 3. Log in to Facebook once (a browser window opens; log in like normal, including 2FA)
 python -m marketplace_bot login
 ```
 
 Your Facebook login stays in the `.fb_profile` folder on your computer. The bot never sees your
 password. Delete that folder to log the bot out.
+
+Optional: copy `.env.example` to `.env` to set your usual location and distance, so you don't have to
+type them every time.
+
+## Smarter matching (free)
+
+[Ollama](https://ollama.com) runs an AI model on your own computer. It's free, works offline, and nothing
+you search for leaves your machine.
+
+1. Download and install Ollama from <https://ollama.com/download>, then open it.
+2. Download a model (once, about 3 GB):
+   ```bash
+   ollama pull gemma3:4b
+   ```
+   With 16 GB or more of memory, `gemma3:12b` is noticeably smarter. Put `OLLAMA_MODEL=gemma3:12b` in `.env`
+   if you use it.
+3. That's it. The next search prints `Matching with: free local AI on your computer`.
+
+On a computer without a graphics card the AI can take 20–60 seconds per listing, so by default it inspects
+the top 15 listings in depth. Change that with `--max-deep` or `MAX_DEEP_CHECKS` in `.env`.
 
 ## Running a search
 
@@ -65,14 +90,7 @@ Activate the environment first (`.venv\Scripts\activate` or `source .venv/bin/ac
 python -m marketplace_bot search "2016-2019 Toyota Tacoma 4x4, under 120k miles, clean title, no rust, under $28,000, within 75 miles of 78701"
 ```
 
-Long prompts are easier to keep in a text file:
-
-```bash
-python -m marketplace_bot search --prompt-file my_search.txt
-```
-
-Use `--plan-only` to check how your prompt was understood before running a full search. It only takes
-a few seconds:
+**Check how your prompt was understood first.** It takes a second:
 
 ```bash
 python -m marketplace_bot search "..." --plan-only
@@ -80,13 +98,30 @@ python -m marketplace_bot search "..." --plan-only
 
 ### Writing a good prompt
 
-- **Say where and how far:** "within 30 miles of Austin, TX" or "within 20 miles of 90210". If you leave it
-  out, `DEFAULT_LOCATION` and `DEFAULT_RADIUS_MILES` from `.env` are used.
-- **Give your budget:** "under $400" or "between $1,000 and $1,500".
-- **List what must be true:** size, model or year range, condition, color, included accessories.
-- **List deal-breakers:** "no water damage", "not a salvage title", "no pet hair".
-- **Add nice-to-haves** separately so they raise a listing's score without excluding others.
-- **Recent listings only:** "posted in the last week".
+- **Where and how far:** "within 30 miles of Austin, TX" or "within 20 miles of 90210".
+- **Budget:** "under $400", "$1,000-$1,500" or "$300 max".
+- **Requirements, separated by commas:** "at least 60 inches wide", "under 120k miles", "2016-2019",
+  "clean title", "two controllers".
+- **Deal-breakers start with "no":** "no rust", "no pet hair", "no stains".
+- **Nice-to-haves:** "would be nice if it has memory presets".
+- **Only recent listings:** "posted in the last week".
+
+For full control, especially with keyword matching, write the prompt as labeled lines in a text file and
+run `python -m marketplace_bot search --prompt-file my_search.txt`:
+
+```
+item: road bike
+location: Portland, OR
+distance: 30 miles
+budget: 800
+must have: carbon frame, 56cm
+nice to have: Shimano 105
+avoid: crashed, cracked
+search: cervelo, trek emonda, carbon road bike
+```
+
+`search:` adds extra search phrases. Keyword matching only knows a few synonyms, so listing other names
+for the item helps it find more.
 
 ### Options
 
@@ -95,15 +130,13 @@ python -m marketplace_bot search "..." --plan-only
 | `--location "Tampa, FL"` | Search around this place, overriding the prompt |
 | `--radius 40` | Max distance in miles, overriding the prompt |
 | `--min-price` / `--max-price` | Price limits, overriding the prompt |
-| `--max-deep 60` | How many listings to open and inspect in depth (default 40) |
-| `--deep-all` | Inspect every listing in range (most thorough, costs the most) |
+| `--max-deep 60` | How many listings to open and check in full |
+| `--deep-all` | Check every listing in range (most thorough, slowest) |
 | `--plan-only` | Show how the prompt was understood, then stop |
 | `--headless` | Hide the browser window |
 | `--out folder` | Where to save results (default: `results/<date>_<search>`) |
 | `--no-open` | Don't open the report automatically |
 | `-v` | Show detailed progress logs |
-
-Defaults for most of these can be set in `.env` (see `.env.example`).
 
 ## How distance works
 
@@ -117,20 +150,6 @@ radius, Facebook is searching around a different place. Fix it by setting your l
 `.env`. To find the ID, pick your city on Marketplace, then click a category: the URL becomes
 `facebook.com/marketplace/<ID>/...`.
 
-## Cost
-
-Each search uses Claude (`claude-opus-5-5` by default). With the default settings (up to 40 listings
-inspected in depth with 3 photos each), expect roughly **$1–3 per search**. To spend less:
-
-- Lower `MAX_DEEP_CHECKS` or `IMAGES_PER_LISTING` in `.env`, or pass `--max-deep 15`.
-- Set `CLAUDE_MODEL=claude-sonnet-5-5` in `.env` (about half the price per token).
-
-The token count for each run is printed at the end.
-
-If Claude's safety filters ever decline a request (very unlikely for shopping), the bot automatically
-retries on a fallback model (`CLAUDE_REFUSAL_FALLBACK=true`). If you switch `CLAUDE_MODEL` to a model that
-doesn't support fallbacks, set it to `false`.
-
 ## Good to know
 
 - **Facebook's rules.** Facebook's terms don't allow automated access. The bot browses slowly with a real
@@ -140,8 +159,11 @@ doesn't support fallbacks, set it to `false`.
   normal browser, Facebook has probably changed its page layout and the bot needs an update. If Facebook keeps
   logging the bot out, run `python -m marketplace_bot login` again, or set `BROWSER_CHANNEL=chrome` to use
   your installed Google Chrome.
-- **Keep secrets out of git.** `.env` (your API key), `.fb_profile/` (your Facebook session) and `results/`
-  are already in `.gitignore`.
+- **Your data stays on your computer.** `.env`, `.fb_profile/` (your Facebook session) and `results/` are
+  in `.gitignore`.
+- **Paid option.** If you ever want the most accurate matching, `AI_BACKEND=claude` plus an
+  `ANTHROPIC_API_KEY` in `.env` uses Anthropic's Claude instead, at about $1–3 per search. It's off unless
+  you turn it on.
 
 ## Development
 
@@ -156,7 +178,10 @@ The code lives in `marketplace_bot/`:
 | --- | --- |
 | `cli.py` | Command-line commands and output |
 | `pipeline.py` | The search funnel (plan → search → filter → screen → inspect → pick) |
-| `ai.py` | Prompts and calls to Claude (structured outputs) |
+| `backends.py` | Chooses keyword matching, local AI or Claude |
+| `rules.py` | Free keyword matching: prompt parsing and listing checks |
+| `ollama_ai.py` | Free local AI through Ollama |
+| `ai.py` | Prompts shared by the AI options, and the paid Claude option |
 | `scraper.py` | Browser automation for Marketplace (Playwright) |
 | `geo.py` | Geocoding and distance |
 | `parsing.py` | Reading prices, titles and locations from page text |

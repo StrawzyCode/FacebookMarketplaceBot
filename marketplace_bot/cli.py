@@ -10,7 +10,8 @@ from pathlib import Path
 
 import anthropic
 
-from .ai import AIError, MatchAI
+from .ai import AIError
+from .backends import BackendError, choose_backend
 from .config import load_settings
 from .geo import GeoLocator, nominatim_geocoder
 from .models import SearchPlan
@@ -47,7 +48,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--min-price", type=int, help="minimum price (overrides the prompt)")
     s.add_argument("--max-price", type=int, help="maximum price (overrides the prompt)")
     s.add_argument("--max-deep", type=int, help="how many listings to open and inspect in depth")
-    s.add_argument("--deep-all", action="store_true", help="inspect every listing in range (slower, costs more)")
+    s.add_argument("--deep-all", action="store_true", help="inspect every listing in range (slower)")
     s.add_argument("--plan-only", action="store_true", help="show how the prompt was understood, then stop")
     s.add_argument("--headless", action="store_true", help="hide the browser window")
     s.add_argument("--out", type=Path, help="folder to write results into")
@@ -71,18 +72,23 @@ def main(argv: list[str] | None = None) -> int:
         print("Tell me what you're looking for, e.g.:\n  python -m marketplace_bot search \"...\"", file=sys.stderr)
         return 2
 
-    ai = MatchAI(anthropic.Anthropic(), settings.model, settings.refusal_fallback)
     try:
-        return _search(args, prompt, settings, ai)
-    except NotLoggedInError as exc:
+        backend = choose_backend(settings)
+        print(f"Matching with: {backend.description}")
+        if backend.tip:
+            print(f"  Tip: {backend.tip}")
+        return _search(args, prompt, settings, backend.matcher)
+    except (NotLoggedInError, BackendError) as exc:
         print(f"\n{exc}", file=sys.stderr)
         return 2
     except anthropic.AuthenticationError:
-        print("\nYour Anthropic API key was rejected. Check ANTHROPIC_API_KEY in your .env file.", file=sys.stderr)
+        print("\nYour Anthropic API key was rejected. Check ANTHROPIC_API_KEY in .env, or set AI_BACKEND=auto "
+              "to use the free options.", file=sys.stderr)
         return 2
     except TypeError as exc:
         if "authentication" in str(exc).lower():
-            print("\nNo Anthropic API key found. Put ANTHROPIC_API_KEY=... in your .env file.", file=sys.stderr)
+            print("\nAI_BACKEND=claude needs ANTHROPIC_API_KEY in .env. Set AI_BACKEND=auto to use the free "
+                  "options instead.", file=sys.stderr)
             return 2
         raise
     except (anthropic.PermissionDeniedError, anthropic.NotFoundError) as exc:
@@ -102,7 +108,7 @@ def _read_prompt(args) -> str:
     return (args.prompt or "").strip()
 
 
-def _search(args, prompt: str, settings, ai: MatchAI) -> int:
+def _search(args, prompt: str, settings, ai) -> int:
     overrides = Overrides(args.location, args.radius, args.min_price, args.max_price)
     print("Understanding your request...")
     plan = plan_search(ai, prompt, settings, overrides)
@@ -147,7 +153,7 @@ def _print_plan(plan: SearchPlan) -> None:
         print(f"  Deal-breakers: {'; '.join(plan.deal_breakers)}")
 
 
-def _print_summary(result, paths, ai: MatchAI) -> None:
+def _print_summary(result, paths, ai) -> None:
     print()
     for w in result.warnings:
         print(f"Note: {w}")
@@ -167,9 +173,10 @@ def _print_summary(result, paths, ai: MatchAI) -> None:
         print("\nAlso worth a look:")
         for l in runners:
             print(f"  {l.evaluation.match_score:>3}/100  {l.price_text or '?':>10}  {l.title[:60]}  {l.url}")
-    u = ai.usage
-    print(
-        f"\nClaude usage: {u.requests} requests, {u.input_tokens + u.cache_read_tokens:,} input tokens "
-        f"({u.cache_read_tokens:,} cached), {u.output_tokens:,} output tokens"
-    )
+    u = getattr(ai, "usage", None)
+    if u:
+        print(
+            f"\nClaude usage: {u.requests} requests, {u.input_tokens + u.cache_read_tokens:,} input tokens "
+            f"({u.cache_read_tokens:,} cached), {u.output_tokens:,} output tokens"
+        )
     print(f"Report: {paths['html']}")

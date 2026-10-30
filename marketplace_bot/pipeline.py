@@ -5,15 +5,15 @@ from __future__ import annotations
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Callable, Protocol
 
 import anthropic
 from playwright.sync_api import Error as PlaywrightError
 
-from .ai import TRIAGE_BATCH_SIZE, AIError, MatchAI
+from .ai import TRIAGE_BATCH_SIZE, AIError
 from .config import Settings
 from .geo import GeoLocator, miles_between
-from .models import Listing, SearchPlan
+from .models import FinalRanking, Listing, ListingEvaluation, SearchPlan
 from .parsing import title_has_excluded_keyword
 from .scraper import NotLoggedInError
 
@@ -25,6 +25,20 @@ FINALIST_MIN_SCORE = 40
 
 # Errors that mean the setup is wrong (bad key, bad model name...), not that one listing failed.
 FATAL_API_ERRORS = (anthropic.AuthenticationError, anthropic.PermissionDeniedError, anthropic.NotFoundError)
+
+
+class Matcher(Protocol):
+    """What the pipeline needs from a matching backend (rules, local AI or Claude)."""
+
+    uses_images: bool
+
+    def plan(self, prompt: str, default_location: str, default_radius_miles: float | None) -> SearchPlan: ...
+
+    def triage(self, prompt: str, plan: SearchPlan, listings: list[Listing]) -> dict[str, tuple[int, str]]: ...
+
+    def evaluate(self, prompt: str, plan: SearchPlan, listing: Listing, images) -> ListingEvaluation: ...
+
+    def final_pick(self, prompt: str, plan: SearchPlan, listings: list[Listing]) -> FinalRanking: ...
 
 
 @dataclass
@@ -47,7 +61,7 @@ class RunResult:
     warnings: list[str] = field(default_factory=list)
 
 
-def plan_search(ai: MatchAI, prompt: str, settings: Settings, overrides: Overrides | None = None) -> SearchPlan:
+def plan_search(ai: Matcher, prompt: str, settings: Settings, overrides: Overrides | None = None) -> SearchPlan:
     plan = ai.plan(prompt, settings.default_location, settings.default_radius_miles)
     o = overrides or Overrides()
     if o.location:
@@ -79,12 +93,13 @@ def run_search(
     plan: SearchPlan,
     settings: Settings,
     scraper,
-    ai: MatchAI,
+    ai: Matcher,
     geo: GeoLocator,
     deep_limit: int | None = None,
     say: Callable[[str], None] = print,
 ) -> RunResult:
-    deep_limit = settings.max_deep_checks if deep_limit is None else deep_limit
+    deep_limit = (settings.max_deep_checks or 40) if deep_limit is None else deep_limit
+    workers = max(1, settings.ai_workers or 1)
     warnings: list[str] = []
 
     # 1. Where is the shopper?
@@ -139,7 +154,7 @@ def run_search(
     # 4. Triage on card info so only the promising ones get opened.
     if len(candidates) > deep_limit:
         say(f"Screening {len(candidates)} listings to pick the {deep_limit} most promising...")
-        _triage(ai, prompt, plan, candidates, settings.ai_workers)
+        _triage(ai, prompt, plan, candidates, workers)
         candidates.sort(key=lambda l: (-(l.triage_score or 0), l.distance_miles or 0))
         shortlist = []
         for l in candidates:
@@ -155,14 +170,15 @@ def run_search(
     # 5. Open each shortlisted listing and have Claude inspect it (pages load while earlier ones are scored).
     say(f"Inspecting {len(shortlist)} listings in depth...")
     evaluated: list[Listing] = []
-    with ThreadPoolExecutor(max_workers=max(1, settings.ai_workers)) as pool:
+    with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {}
         for i, listing in enumerate(shortlist, 1):
             say(f"  [{i}/{len(shortlist)}] {listing.title[:70]}")
             images: list[tuple[str, bytes]] = []
             try:
                 scraper.fetch_details(listing)
-                images = scraper.download_images(listing.image_urls)
+                if getattr(ai, "uses_images", True):
+                    images = scraper.download_images(listing.image_urls)
             except NotLoggedInError:
                 raise
             except PlaywrightError as exc:
@@ -235,7 +251,7 @@ def _apply_distance(listing: Listing, plan: SearchPlan, home, country: str | Non
         listing.skip_reason = f"too far ({listing.distance_miles:.0f} mi away)"
 
 
-def _triage(ai: MatchAI, prompt: str, plan: SearchPlan, candidates: list[Listing], workers: int) -> None:
+def _triage(ai: Matcher, prompt: str, plan: SearchPlan, candidates: list[Listing], workers: int) -> None:
     batches = [candidates[i : i + TRIAGE_BATCH_SIZE] for i in range(0, len(candidates), TRIAGE_BATCH_SIZE)]
     with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
         futures = {pool.submit(ai.triage, prompt, plan, batch): batch for batch in batches}
@@ -253,7 +269,7 @@ def _triage(ai: MatchAI, prompt: str, plan: SearchPlan, candidates: list[Listing
                 listing.triage_score, listing.triage_reason = scores.get(listing.id, (5, "not screened"))
 
 
-def _evaluate(ai: MatchAI, prompt: str, plan: SearchPlan, listing: Listing, images) -> None:
+def _evaluate(ai: Matcher, prompt: str, plan: SearchPlan, listing: Listing, images) -> None:
     try:
         try:
             listing.evaluation = ai.evaluate(prompt, plan, listing, images)

@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from marketplace_bot.ai import FALLBACK_BETA, AIError, MatchAI
+from marketplace_bot.ai import FALLBACK_BETA, AIError, ClaudeMatcher
 from marketplace_bot.models import ListingEvaluation, SearchPlan, TriageBatch, TriageItem
 
 from .conftest import make_listing
@@ -34,7 +34,7 @@ def fake_client(parsed, stop_reason="end_turn"):
 
 def test_request_uses_structured_output_effort_and_refusal_fallback(plan):
     client, messages = fake_client(plan)
-    ai = MatchAI(client, "claude-opus-5-5")
+    ai = ClaudeMatcher(client, "claude-opus-5-5")
 
     assert ai.plan("a desk near Austin", "Austin, TX", 25) is plan
 
@@ -51,23 +51,23 @@ def test_request_uses_structured_output_effort_and_refusal_fallback(plan):
 
 def test_fallback_can_be_turned_off(plan):
     client, messages = fake_client(plan)
-    MatchAI(client, "claude-opus-5-5", refusal_fallback=False).plan("x", "", None)
+    ClaudeMatcher(client, "claude-opus-5-5", refusal_fallback=False).plan("x", "", None)
     assert "fallbacks" not in messages.calls[0] and "betas" not in messages.calls[0]
 
 
 def test_refusal_and_truncation_raise(plan):
     client, _ = fake_client(plan, stop_reason="refusal")
     with pytest.raises(AIError, match="declined"):
-        MatchAI(client, "m").plan("x", "", None)
+        ClaudeMatcher(client, "m").plan("x", "", None)
     client, _ = fake_client(plan, stop_reason="max_tokens")
     with pytest.raises(AIError, match="cut off"):
-        MatchAI(client, "m").plan("x", "", None)
+        ClaudeMatcher(client, "m").plan("x", "", None)
 
 
 def test_triage_drops_unknown_ids_and_clamps_scores(plan):
     batch = TriageBatch(items=[TriageItem(id="1", score=14, reason="r"), TriageItem(id="999", score=3, reason="r")])
     client, messages = fake_client(batch)
-    result = MatchAI(client, "m").triage("desk", plan, [make_listing("1", "Desk", 10, "Austin, TX")])
+    result = ClaudeMatcher(client, "m").triage("desk", plan, [make_listing("1", "Desk", 10, "Austin, TX")])
     assert result == {"1": (10, "r")}
     assert messages.calls[0]["output_config"] == {"effort": "low"}
 
@@ -81,7 +81,7 @@ def test_evaluate_sends_photos_before_text(plan):
     listing = make_listing("1", "Desk", 10, "Austin, TX")
     listing.description = "Barely used <b>desk</b>"
 
-    MatchAI(client, "m").evaluate("desk", plan, listing, [("image/jpeg", b"abc")])
+    ClaudeMatcher(client, "m").evaluate("desk", plan, listing, [("image/jpeg", b"abc")])
 
     content = messages.calls[0]["messages"][0]["content"]
     assert content[0] == {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "YWJj"}}

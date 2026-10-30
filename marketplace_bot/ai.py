@@ -1,4 +1,9 @@
-"""Everything that talks to Claude: planning searches, triaging cards, scoring listings, picking a winner."""
+"""AI matching: planning searches, triaging cards, scoring listings, picking a winner.
+
+``LLMMatcher`` holds the prompts and works with any language model; subclasses only
+supply ``_ask``. ``ClaudeMatcher`` uses the paid Anthropic API. The free options live
+in ``ollama_ai.py`` (a model running on your own computer) and ``rules.py`` (no AI).
+"""
 
 from __future__ import annotations
 
@@ -7,7 +12,6 @@ import json
 import threading
 from dataclasses import dataclass
 
-import anthropic
 from pydantic import BaseModel
 
 from .models import FinalRanking, Listing, ListingEvaluation, SearchPlan, TriageBatch
@@ -88,50 +92,29 @@ def _fmt_distance(listing: Listing) -> str:
     return "unknown" if listing.distance_miles is None else f"{listing.distance_miles:.0f} mi"
 
 
-class MatchAI:
-    def __init__(self, client: anthropic.Anthropic, model: str, refusal_fallback: bool = True):
-        self.client = client
-        self.model = model
-        self.refusal_fallback = refusal_fallback
-        self.usage = Usage()
-        self._lock = threading.Lock()
+class LLMMatcher:
+    """Builds the prompts for each step; subclasses send them to a specific model."""
 
-    def _ask(self, output_format: type[BaseModel], system: str, content, effort: str, max_tokens: int = 16000):
-        extra = {"betas": [FALLBACK_BETA], "fallbacks": "default"} if self.refusal_fallback else {}
-        response = self.client.beta.messages.parse(
-            model=self.model,
-            max_tokens=max_tokens,
-            system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
-            messages=[{"role": "user", "content": content}],
-            output_config={"effort": effort},
-            output_format=output_format,
-            **extra,
-        )
-        with self._lock:
-            u = response.usage
-            self.usage.requests += 1
-            self.usage.input_tokens += (u.input_tokens or 0) + (u.cache_creation_input_tokens or 0)
-            self.usage.output_tokens += u.output_tokens or 0
-            self.usage.cache_read_tokens += u.cache_read_input_tokens or 0
+    uses_images = True
 
-        if response.stop_reason == "refusal":
-            category = getattr(response.stop_details, "category", None) if response.stop_details else None
-            raise AIError(f"Claude declined this request (category: {category or 'unspecified'})")
-        if response.stop_reason == "max_tokens":
-            raise AIError("Claude's answer was cut off (max_tokens)")
-        parsed = response.parsed_output
-        if parsed is None:
-            raise AIError("Claude did not return a structured answer")
-        return parsed
+    def _ask(
+        self,
+        output_format: type[BaseModel],
+        system: str,
+        text: str,
+        images: list[tuple[str, bytes]],
+        effort: str,
+    ):
+        raise NotImplementedError
 
     def plan(self, prompt: str, default_location: str, default_radius_miles: float | None) -> SearchPlan:
-        content = (
+        text = (
             f"<shopper_request>\n{prompt.strip()}\n</shopper_request>\n\n"
             f"Default location if the request names none: {default_location or 'none'}\n"
             f"Default radius in miles if the request names none: "
             f"{default_radius_miles if default_radius_miles is not None else 'none'}"
         )
-        return self._ask(SearchPlan, PLAN_SYSTEM, content, effort="medium")
+        return self._ask(SearchPlan, PLAN_SYSTEM, text, [], effort="medium")
 
     def triage(self, prompt: str, plan: SearchPlan, listings: list[Listing]) -> dict[str, tuple[int, str]]:
         """Score one batch of search cards. Returns {listing_id: (score 0-10, reason)}."""
@@ -142,13 +125,13 @@ class MatchAI:
                 f"- id={l.id} | title: {l.title} | price: {_fmt_price(l)} | location: {l.location or 'unknown'} "
                 f"| distance: {_fmt_distance(l)}" + (f" | extra: {extras}" if extras else "")
             )
-        content = (
+        text = (
             _shopper_context(prompt, plan)
             + "\n\n<listings>\n"
             + "\n".join(rows)
             + "\n</listings>\n\nScore every listing above."
         )
-        result: TriageBatch = self._ask(TriageBatch, TRIAGE_SYSTEM, content, effort="low")
+        result: TriageBatch = self._ask(TriageBatch, TRIAGE_SYSTEM, text, [], effort="low")
         wanted = {l.id for l in listings}
         return {
             item.id: (max(0, min(10, item.score)), item.reason)
@@ -159,14 +142,6 @@ class MatchAI:
     def evaluate(
         self, prompt: str, plan: SearchPlan, listing: Listing, images: list[tuple[str, bytes]]
     ) -> ListingEvaluation:
-        content: list[dict] = []
-        for media_type, data in images:
-            content.append(
-                {
-                    "type": "image",
-                    "source": {"type": "base64", "media_type": media_type, "data": base64.b64encode(data).decode()},
-                }
-            )
         details = {
             "title": listing.title,
             "price": _fmt_price(listing),
@@ -176,23 +151,20 @@ class MatchAI:
             "card_details": listing.extras,
             "url": listing.url,
         }
-        content.append(
-            {
-                "type": "text",
-                "text": (
-                    _shopper_context(prompt, plan)
-                    + "\n\n<listing>\n"
-                    + json.dumps(details, indent=2, ensure_ascii=False)
-                    + "\n\n<description>\n"
-                    + (listing.description or "(none captured)")
-                    + "\n</description>\n\n<page_text>\n"
-                    + (listing.page_text or "(none captured)")
-                    + "\n</page_text>\n</listing>\n\n"
-                    + f"{len(images)} photo(s) from the listing are attached above. Evaluate this listing."
-                ),
-            }
+        text = (
+            _shopper_context(prompt, plan)
+            + "\n\n<listing>\n"
+            + json.dumps(details, indent=2, ensure_ascii=False)
+            + "\n\n<description>\n"
+            + (listing.description or "(none captured)")
+            + "\n</description>\n\n<page_text>\n"
+            + (listing.page_text or "(none captured)")
+            + "\n</page_text>\n</listing>\n\n"
+            + f"{len(images)} photo(s) from the listing are attached. Evaluate this listing."
         )
-        return self._ask(ListingEvaluation, EVALUATE_SYSTEM, content, effort="medium")
+        result: ListingEvaluation = self._ask(ListingEvaluation, EVALUATE_SYSTEM, text, images, effort="medium")
+        result.match_score = max(0, min(100, result.match_score))
+        return result
 
     def final_pick(self, prompt: str, plan: SearchPlan, listings: list[Listing]) -> FinalRanking:
         blocks = []
@@ -216,15 +188,63 @@ class MatchAI:
                     ensure_ascii=False,
                 )
             )
-        content = (
+        text = (
             _shopper_context(prompt, plan)
             + "\n\n<finalists>\n"
             + "\n".join(blocks)
             + "\n</finalists>\n\nRank the finalists and pick the best one."
         )
-        result: FinalRanking = self._ask(FinalRanking, FINAL_SYSTEM, content, effort="high")
+        result: FinalRanking = self._ask(FinalRanking, FINAL_SYSTEM, text, [], effort="high")
         ids = {l.id for l in listings}
         result.ranking = [i for i in result.ranking if i in ids]
         if result.best_id and result.best_id not in ids:
             result.best_id = ""
         return result
+
+
+class ClaudeMatcher(LLMMatcher):
+    """Paid option: Claude via the Anthropic API (needs ANTHROPIC_API_KEY)."""
+
+    def __init__(self, client, model: str, refusal_fallback: bool = True):
+        self.client = client
+        self.model = model
+        self.refusal_fallback = refusal_fallback
+        self.usage = Usage()
+        self._lock = threading.Lock()
+
+    def _ask(self, output_format, system, text, images, effort):
+        content: str | list[dict] = text
+        if images:
+            content = [
+                {
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": media_type, "data": base64.b64encode(data).decode()},
+                }
+                for media_type, data in images
+            ] + [{"type": "text", "text": text}]
+        extra = {"betas": [FALLBACK_BETA], "fallbacks": "default"} if self.refusal_fallback else {}
+        response = self.client.beta.messages.parse(
+            model=self.model,
+            max_tokens=16000,
+            system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
+            messages=[{"role": "user", "content": content}],
+            output_config={"effort": effort},
+            output_format=output_format,
+            **extra,
+        )
+        with self._lock:
+            u = response.usage
+            self.usage.requests += 1
+            self.usage.input_tokens += (u.input_tokens or 0) + (u.cache_creation_input_tokens or 0)
+            self.usage.output_tokens += u.output_tokens or 0
+            self.usage.cache_read_tokens += u.cache_read_input_tokens or 0
+
+        if response.stop_reason == "refusal":
+            category = getattr(response.stop_details, "category", None) if response.stop_details else None
+            raise AIError(f"Claude declined this request (category: {category or 'unspecified'})")
+        if response.stop_reason == "max_tokens":
+            raise AIError("Claude's answer was cut off (max_tokens)")
+        parsed = response.parsed_output
+        if parsed is None:
+            raise AIError("Claude did not return a structured answer")
+        return parsed
